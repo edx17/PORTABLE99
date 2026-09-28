@@ -43,6 +43,8 @@ class Operacion:
     pdfs: list[Path]
     archivo: str = ""  # nombre del PDF final (sin carpeta)
     paginas: list[Pagina] | None = field(default=None)  # None = orden automático
+    firmas: dict[Path, tuple] = field(default_factory=dict)  # tamaño/fecha al escanear
+    ignorados: list[Path] = field(default_factory=list)  # unificados viejos dentro de la carpeta
 
     @property
     def editada(self) -> bool:
@@ -55,8 +57,17 @@ class Operacion:
         destino = self.salida(dir_salida)
         if not destino.exists():
             return NUEVO
-        ultimo = max((p.stat().st_mtime for p in self.pdfs), default=0)
-        return LISTO if destino.stat().st_mtime >= ultimo else MODIFICADO
+        # st_ctime en Windows es la fecha en que el archivo llegó a la carpeta
+        # (un PDF copiado conserva su fecha de modificación vieja), y la fecha
+        # de la carpeta cambia cuando se agrega, borra o renombra un archivo.
+        fechas = [0.0]
+        for p in [*self.pdfs, self.carpeta]:
+            try:
+                st = p.stat()
+                fechas += [st.st_mtime, st.st_ctime]
+            except OSError:
+                pass
+        return LISTO if destino.stat().st_mtime >= max(fechas) else MODIFICADO
 
 
 def _nombre_valido(nombre: str) -> str:
@@ -86,6 +97,70 @@ def _es_pdf(nombre: str) -> bool:
     return nombre.lower().endswith(".pdf") and not nombre.startswith("~$")
 
 
+def firma(pdf: Path) -> tuple:
+    try:
+        st = pdf.stat()
+        return (st.st_size, st.st_mtime)
+    except OSError:
+        return ()
+
+
+def cargar_pdfs(op: Operacion, plantilla: str) -> None:
+    """Lee los PDF de la carpeta de la operación (sin subcarpetas).
+
+    Se ignoran los que empiezan con el nombre del PDF final (p. ej. un
+    "183358-99-.pdf" viejo guardado en la misma carpeta), para no meter un
+    unificado anterior dentro del nuevo.
+    """
+    exacto = nombre_salida(plantilla, op).lower()
+    prefijo = exacto[:-4]
+    if prefijo in (numero_operacion(op.nombre).lower(), op.nombre.lower()):
+        prefijo = exacto  # plantilla sin agregado: ignorar solo el nombre exacto
+    try:
+        nombres = [e.name for e in os.scandir(op.carpeta) if e.is_file() and _es_pdf(e.name)]
+    except OSError:
+        nombres = []
+    op.pdfs, op.ignorados = [], []
+    for nombre in nombres:
+        (op.ignorados if nombre.lower().startswith(prefijo) else op.pdfs).append(op.carpeta / nombre)
+    op.pdfs = ordenar_pdfs(op.pdfs)
+    op.firmas = {p: firma(p) for p in op.pdfs}
+
+
+def reconciliar(op: Operacion, previas: list[Pagina], firmas_previas: dict[Path, tuple]
+                ) -> tuple[int, int]:
+    """Adapta un orden manual a los archivos que hay ahora en la carpeta.
+
+    Se conservan las hojas de los archivos que no cambiaron (en el orden que
+    tenían), se descartan las de archivos borrados o modificados y los
+    archivos nuevos o modificados se agregan al final. Devuelve
+    (archivos agregados, archivos quitados).
+    """
+    iguales = {p for p in op.pdfs if firmas_previas.get(p) == op.firmas.get(p)}
+    nuevos = [p for p in op.pdfs if p not in iguales]
+    quitados = [p for p in firmas_previas if p not in iguales]
+    paginas = [pg for pg in previas if pg.archivo in iguales]
+    for pdf in nuevos:
+        try:
+            with abrir(pdf) as doc:
+                paginas.extend(Pagina(pdf, i) for i in range(doc.page_count))
+        except Exception:
+            paginas.append(Pagina(pdf, 0))  # se verá como "no se pudo abrir"
+    op.paginas = paginas
+    return len(nuevos), len([q for q in quitados if q not in op.firmas])
+
+
+def refrescar(op: Operacion, plantilla: str) -> tuple[int, int] | None:
+    """Vuelve a leer la carpeta. Si cambió algo devuelve (agregados, quitados)."""
+    firmas_previas = op.firmas
+    cargar_pdfs(op, plantilla)
+    if op.firmas == firmas_previas:
+        return None
+    if op.paginas is None:
+        return (len(set(op.firmas) - set(firmas_previas)), len(set(firmas_previas) - set(op.firmas)))
+    return reconciliar(op, op.paginas, firmas_previas)
+
+
 def escanear(base: Path, dir_salida: Path, excluir: list[str],
              plantilla: str = PLANTILLA_DEFAULT) -> list[Operacion]:
     """Recorre base/CLIENTE/.../OPERACION y devuelve cada carpeta que tenga PDFs.
@@ -107,12 +182,14 @@ def escanear(base: Path, dir_salida: Path, excluir: list[str],
         for raiz, dirs, archivos in os.walk(cliente):
             raiz_p = Path(raiz)
             dirs[:] = sorted((d for d in dirs if not excluida(raiz_p / d)), key=str.lower)
-            pdfs = ordenar_pdfs([raiz_p / a for a in archivos if _es_pdf(a)])
-            if not pdfs:
+            if not any(_es_pdf(a) for a in archivos):
                 continue
             rel = raiz_p.relative_to(cliente)
             nombre = cliente.name if rel == Path(".") else " - ".join(rel.parts)
-            operaciones.append(Operacion(cliente.name, nombre, raiz_p, pdfs))
+            op = Operacion(cliente.name, nombre, raiz_p, [])
+            cargar_pdfs(op, plantilla)
+            if op.pdfs:
+                operaciones.append(op)
 
     # Todos los PDF van a la misma carpeta: si dos operaciones dan el mismo
     # nombre se les agrega el cliente (y un número si aun así se repite).
@@ -137,7 +214,9 @@ def ordenar_pdfs(pdfs: list[Path]) -> list[Path]:
 
 
 def abrir(pdf: Path) -> pymupdf.Document:
-    doc = pymupdf.open(pdf)
+    # Se lee a memoria para no dejar el archivo abierto: en Windows eso impediría
+    # renombrarlo o borrarlo desde el Explorador mientras el programa está abierto.
+    doc = pymupdf.open(stream=pdf.read_bytes(), filetype="pdf")
     if doc.needs_pass and not doc.authenticate(""):
         doc.close()
         raise ValueError(f"'{pdf.name}' está protegido con contraseña")
@@ -147,8 +226,11 @@ def abrir(pdf: Path) -> pymupdf.Document:
 def paginas_por_defecto(op: Operacion) -> list[Pagina]:
     paginas: list[Pagina] = []
     for pdf in ordenar_pdfs(op.pdfs):
-        with abrir(pdf) as doc:
-            paginas.extend(Pagina(pdf, i) for i in range(doc.page_count))
+        try:
+            with abrir(pdf) as doc:
+                paginas.extend(Pagina(pdf, i) for i in range(doc.page_count))
+        except Exception:
+            paginas.append(Pagina(pdf, 0))  # se muestra como error en el visor
     return paginas
 
 
@@ -169,6 +251,8 @@ def unificar(op: Operacion, dir_salida: Path) -> Path:
     try:
         for pag in paginas:
             if pag.archivo not in abiertos:
+                if not pag.archivo.exists():
+                    raise ValueError(f"'{pag.archivo.name}' ya no está en la carpeta (volvé a escanear)")
                 try:
                     abiertos[pag.archivo] = abrir(pag.archivo)
                 except Exception as e:
@@ -178,7 +262,7 @@ def unificar(op: Operacion, dir_salida: Path) -> Path:
             if pag.rotacion:
                 nueva = final[-1]
                 nueva.set_rotation((nueva.rotation + pag.rotacion) % 360)
-        fd, tmp = tempfile.mkstemp(suffix=".pdf", dir=destino.parent)
+        fd, tmp = tempfile.mkstemp(prefix="~$", suffix=".pdf", dir=destino.parent)
         os.close(fd)
         try:
             final.save(tmp, garbage=3, deflate=True)

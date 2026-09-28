@@ -26,7 +26,11 @@ el mismo nombre, se agrega el cliente: `183512-99- (SACDE).pdf`.
 2. **Carpeta base** → Examinar… → se listan clientes y operaciones con su estado:
    - **Pendiente**: todavía no se unificó.
    - **Cambió**: se agregó o modificó algún PDF después de unificar.
-   - **Unificado**: ya está al día.  (✎ = tiene orden manual sin guardar)
+   - **Unificado**: ya está al día.  (✎ = tiene orden manual)
+   Si se agregan o borran archivos, al volver a la ventana (o con Escanear) se actualiza
+   solo: lo nuevo se agrega al final y se conserva el orden manual del resto.
+   Un PDF viejo con el nombre del unificado (ej. `183358-99-...pdf`) dentro de la carpeta
+   se ignora para no duplicar hojas.
 3. Clic en una operación. Los documentos arrancan en orden alfabético; se ordenan a mano:
    - **Documentos** (panel del medio): arrastrar o ▲/▼ mueve el PDF entero con todas sus
      hojas. Clic en un documento marca sus hojas.

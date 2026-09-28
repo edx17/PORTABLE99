@@ -57,6 +57,15 @@ def guardar_config(cfg: dict) -> None:
         pass  # carpeta de solo lectura: no pasa nada
 
 
+def motivo_error(pag: core.Pagina, e: Exception) -> str:
+    if not pag.archivo.exists():
+        return "Archivo no\nencontrado"
+    texto = str(e).lower()
+    if "contraseña" in texto:
+        return "Protegido con\ncontraseña"
+    return "No se pudo\nabrir el PDF"
+
+
 def abrir_en_sistema(ruta: Path) -> None:
     if sys.platform.startswith("win"):
         os.startfile(ruta)  # type: ignore[attr-defined]
@@ -99,8 +108,12 @@ class Renderizador:
         pix = self._pagina(pag).get_pixmap(matrix=mat, alpha=False, colorspace=pymupdf.csRGB)
         img = tk.PhotoImage(data=pix.tobytes("ppm"))
         if clave is not None:
-            if len(self.cache) > 600:
-                self.cache.clear()
+            if len(self.cache) > 1500:
+                # primero se descartan miniaturas de otros tamaños; las que están
+                # en pantalla no se pierden porque el visor guarda su propia referencia
+                tamano = clave[3:]
+                for k in [k for k in self.cache if k[3:] != tamano] or list(self.cache)[:500]:
+                    del self.cache[k]
             self.cache[clave] = img
         return img
 
@@ -256,7 +269,8 @@ class VistaPrevia(tk.Toplevel):
             zoom = min(zoom, 9000 / max(w, h))  # límite de memoria
             self.img = self.app.render.imagen_zoom(pag, zoom)
         except Exception as e:
-            self.canvas.create_text(20, 20, anchor="nw", text=f"No se pudo mostrar: {e}", fill="white")
+            self.canvas.create_text(20, 20, anchor="nw", fill="white",
+                                    text=f"{motivo_error(pag, e)}\n\n{pag.archivo}\n{e}")
             return
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
         iw, ih = self.img.width(), self.img.height()
@@ -288,6 +302,7 @@ class App:
         self.trabajando = False
         self._generacion = 0
         self._pendientes: list = []
+        self._en_pantalla: list[tk.PhotoImage] = []
         self._dibujo_programado = None
         self._doc_origen: int | None = None
 
@@ -296,6 +311,7 @@ class App:
         root.minsize(int(950 * self.escala), int(560 * self.escala))
         self._armar_ui()
         root.protocol("WM_DELETE_WINDOW", self.salir)
+        root.bind("<FocusIn>", self.al_volver_a_la_ventana)
         if self.var_base.get() and Path(self.var_base.get()).is_dir():
             root.after(100, self.escanear)
 
@@ -483,15 +499,21 @@ class App:
             messagebox.showwarning(APP_TITULO, "Elegí una carpeta base válida.")
             return
         # conservar el orden manual de lo que ya se había editado
-        editadas = {(op.cliente, op.nombre): op.paginas for op in self.operaciones if op.editada}
+        editadas = {(op.cliente, op.nombre): (op.paginas, op.firmas)
+                    for op in self.operaciones if op.editada}
         try:
             self.operaciones = core.escanear(base, self.dir_salida(), self.var_excluir.get().split(","),
                                              self.var_plantilla.get().strip())
         except Exception as e:
             messagebox.showerror(APP_TITULO, f"Error al leer las carpetas:\n{e}")
             return
+        cambios = []
         for op in self.operaciones:
-            op.paginas = editadas.get((op.cliente, op.nombre))
+            if (op.cliente, op.nombre) in editadas:
+                previas, firmas = editadas[(op.cliente, op.nombre)]
+                agregados, quitados = core.reconciliar(op, previas, firmas)
+                if agregados or quitados:
+                    cambios.append(self._texto_cambio(op, agregados, quitados))
         self.guardar_preferencias()
         self.arbol.delete(*self.arbol.get_children())
         clientes: dict[str, str] = {}
@@ -503,7 +525,7 @@ class App:
         self.mostrar_operacion(None)
         pendientes = sum(1 for op in self.operaciones if op.estado(self.dir_salida()) != core.LISTO)
         self.estado(f"{len(self.operaciones)} operaciones en {len(clientes)} clientes — "
-                    f"{pendientes} para unificar.")
+                    f"{pendientes} para unificar." + ("  " + " · ".join(cambios) if cambios else ""))
 
     def refrescar_estados(self) -> None:
         salida = self.dir_salida()
@@ -526,7 +548,35 @@ class App:
         sel = self.arbol.selection()
         op = self.operaciones[int(sel[0][2:])] if len(sel) == 1 and sel[0].startswith("op") else None
         if op is not self.op_actual:
+            self.refrescar_operacion(op, mostrar=False)
             self.mostrar_operacion(op)
+
+    def _texto_cambio(self, op: core.Operacion, agregados: int, quitados: int) -> str:
+        partes = []
+        if agregados:
+            partes.append(f"{agregados} archivo(s) nuevo(s) agregado(s) al final")
+        if quitados:
+            partes.append(f"{quitados} ya no está(n)")
+        return f"{op.nombre}: " + ", ".join(partes)
+
+    def refrescar_operacion(self, op: core.Operacion | None, mostrar: bool = True) -> None:
+        """Relee la carpeta de la operación por si se agregaron o borraron archivos."""
+        if op is None or self.trabajando:
+            return
+        cambio = core.refrescar(op, self.var_plantilla.get().strip())
+        if cambio is None:
+            return
+        self.refrescar_estados()
+        self.estado("Carpeta actualizada — " + self._texto_cambio(op, *cambio))
+        if mostrar and op is self.op_actual:
+            sel = self.sel
+            self.mostrar_operacion(op)
+            self.seleccionar(sel)
+
+    def al_volver_a_la_ventana(self, e) -> None:
+        # al volver del Explorador, revisar si cambió la carpeta que se está viendo
+        if e.widget is self.root:
+            self.refrescar_operacion(self.op_actual)
 
     def mostrar_operacion(self, op: core.Operacion | None) -> None:
         self.render.cerrar()
@@ -552,6 +602,8 @@ class App:
         op = self.op_actual
         if op:
             extra = "   (orden manual ✎)" if op.editada else ""
+            if op.ignorados:
+                extra += "   · se ignora " + ", ".join(p.name for p in op.ignorados) + " (unificado anterior)"
             self.lbl_op.config(text=f"{op.cliente} / {op.nombre}  →  {op.archivo}  —  "
                                     f"{len(self.paginas)} hojas{extra}")
 
@@ -668,6 +720,7 @@ class App:
         self._dibujo_programado = None
         self._generacion += 1
         self._pendientes = []
+        self._en_pantalla: list[tk.PhotoImage] = []
         c = self.canvas
         c.delete("all")
         cw, ch = self.celda
@@ -685,6 +738,7 @@ class App:
             img = self.render.en_cache(pag, ancho, alto)
             if img is not None:
                 c.create_image(cx, y0 + alto // 2, image=img)
+                self._en_pantalla.append(img)
             else:
                 item = c.create_text(cx, y0 + alto // 2, text="…", fill="#888")
                 self._pendientes.append((i, pag, cx, y0 + alto // 2, item))
@@ -717,10 +771,11 @@ class App:
             try:
                 img = self.render.imagen(pag, ancho, alto)
                 nuevo = self.canvas.create_image(x, y, image=img)
+                self._en_pantalla.append(img)
                 self.canvas.tag_lower(nuevo, item)  # encima del recuadro de selección
                 self.canvas.delete(item)
-            except Exception:
-                self.canvas.itemconfig(item, text="No se pudo\nmostrar", justify="center")
+            except Exception as e:
+                self.canvas.itemconfig(item, text=motivo_error(pag, e), justify="center", fill="#b30000")
         self.root.after(1, self._renderizar_pendientes, generacion)
 
     def indice_en(self, x: float, y: float) -> int | None:
