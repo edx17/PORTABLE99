@@ -14,7 +14,11 @@ BASE\
   copiar a contable\           <- se ignora
 ```
 
-Resultado: `BASE\_UNIFICADOS\ARDION\183512 - 1064679.pdf` (se puede elegir otra carpeta de salida).
+Resultado: todos los PDF finales en `BASE\_Unificados\`, con el nombre
+`<número de operación>-99-.pdf` → `183512-99-.pdf`. El nombre se puede cambiar
+en el campo **Nombre del PDF** (`{operacion}` = primer número de la carpeta,
+`{carpeta}` = nombre completo, `{cliente}` = cliente). Si dos operaciones dieran
+el mismo nombre, se agrega el cliente: `183512-99- (SACDE).pdf`.
 
 ## Uso
 
@@ -22,25 +26,21 @@ Resultado: `BASE\_UNIFICADOS\ARDION\183512 - 1064679.pdf` (se puede elegir otra 
 2. **Carpeta base** → Examinar… → se listan clientes y operaciones con su estado:
    - **Pendiente**: todavía no se unificó.
    - **Cambió**: se agregó o modificó algún PDF después de unificar.
-   - **Unificado**: ya está al día.
-3. Clic en una operación para ver las hojas en miniatura:
-   - **Arrastrar** para reordenar (o ◀ Mover / Mover ▶, o flechas del teclado).
-   - **↻ Rotar**, **Quitar hoja** (tecla Supr), **Restaurar orden**.
-   - **Doble clic** / barra espaciadora → vista previa grande (←/→ para navegar).
-4. **Unificar pendientes** genera todo lo que falta; **Unificar seleccionadas** rehace las marcadas
-   (se puede seleccionar un cliente entero).
+   - **Unificado**: ya está al día.  (✎ = tiene orden manual sin guardar)
+3. Clic en una operación. Los documentos arrancan en orden alfabético; se ordenan a mano:
+   - **Documentos** (panel del medio): arrastrar o ▲/▼ mueve el PDF entero con todas sus
+     hojas. Clic en un documento marca sus hojas.
+   - **Hojas** (miniaturas): arrastrar para mover; Ctrl+clic / Shift+clic para elegir varias
+     y moverlas juntas; ⏮ ⏭ al principio / final; ↺ ↻ rotar; Supr quita.
+     Ctrl+rueda o el control **Tamaño** agranda las miniaturas.
+   - **Vista previa** (doble clic, Enter o espacio): hoja en grande y nítida, con
+     *Página entera*, *Ancho*, zoom −/+ (o Ctrl+rueda), arrastrar para desplazarse,
+     ←/→ para pasar de hoja, rotar y quitar desde ahí mismo.
+4. **Unificar pendientes** genera todo lo que falta (y lo que tenga orden manual);
+   **Unificar seleccionadas** rehace las marcadas (se puede elegir un cliente entero).
 
-### Orden automático
-
-1. Facturas del cliente (archivo con el nombre del cliente y `-F-`, `FACTURA`, `-NC-`, `-ND-`)
-2. Remitos (`-R-` o `REMITO`)
-3. Otros documentos del cliente
-4. Facturas de terceros
-
-Dentro de cada grupo, por nombre de archivo. Si el orden automático no sirve para una operación,
-se reordena a mano en el visor antes de unificar.
-
-La configuración (última carpeta, etc.) se guarda en `unificador_config.json` al lado del exe.
+La configuración (última carpeta, tamaño de miniaturas, etc.) se guarda en
+`unificador_config.json` al lado del exe.
 
 ## Obtener el .exe
 
